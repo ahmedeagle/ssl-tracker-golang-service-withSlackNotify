@@ -7,3 +7,4 @@ Run the services
 1- add all your domains to domains.csv 
 2- run the application by default  the ticker is running every 24h 
 3- add your slack channel url to config.yml 
+4- go run go.main
