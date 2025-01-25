@@ -105,14 +105,14 @@ func CheckSSL(domain string) SSLCheckResult {
 }
 
 // SendSlackNotification sends a notification to Slack
-func SendSlackNotification(webhookURL, message string) {
+func SendSlackNotification(webhookURL, domain, expirationDate string, daysRemaining int) {
+	message := fmt.Sprintf("⚠️ SSL Certificate Expiration Alert ⚠️\nDomain: %s\nExpiration Date: %s\nDays Remaining: %d", domain, expirationDate, daysRemaining)
 	payload := map[string]string{"text": message}
 	jsonPayload, _ := json.Marshal(payload)
 
-	logger.Info("==> Performing periodic SSL checks...")
-	logger.Infof("%s", jsonPayload)
-	dialer := &http.Client{Timeout: 10 * time.Second}
-	_, err := dialer.Post(webhookURL, "application/json", bytes.NewReader(jsonPayload))
+	logger.Infof("Sending Slack notification: %s", message)
+	client := &http.Client{Timeout: 10 * time.Second}
+	_, err := client.Post(webhookURL, "application/json", bytes.NewReader(jsonPayload))
 	if err != nil {
 		logger.Errorf("Failed to send Slack notification: %v", err)
 	}
@@ -124,7 +124,6 @@ func PerformChecks(domains []string, slackWebhookURL string) {
 	var wg sync.WaitGroup
 	resultsChannel := make(chan SSLCheckResult, len(domains))
 
-	// have a seprate routine for each domain checker and block main func untill all domain completeled muli goroutine group
 	for _, domain := range domains {
 		wg.Add(1)
 		go func(domain string) {
@@ -140,9 +139,10 @@ func PerformChecks(domains []string, slackWebhookURL string) {
 		results = append(results, result)
 		if result.Error != "" {
 			logger.Warnf("Error for %s: %s", result.Domain, result.Error)
-			SendSlackNotification(slackWebhookURL, fmt.Sprintf("Error for %s: %s", result.Domain, result.Error))
+			SendSlackNotification(slackWebhookURL, result.Domain, "N/A", 0)
 		} else if result.IsValid && result.ExpiresInDays <= 8 {
-			SendSlackNotification(slackWebhookURL, fmt.Sprintf("Alert: %s certificate will expire in %d days", result.Domain, result.ExpiresInDays))
+			expirationDate := time.Now().Add(time.Duration(result.ExpiresInDays) * 24 * time.Hour).Format("2006-01-02")
+			SendSlackNotification(slackWebhookURL, result.Domain, expirationDate, result.ExpiresInDays)
 		}
 	}
 }

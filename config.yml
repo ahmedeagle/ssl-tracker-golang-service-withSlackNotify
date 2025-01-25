@@ -1,2 +1,2 @@
-slack_webhook_url: ""
+slack_webhook_url: "https://hooks.slack.com/services/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"
 csv_file_path: "domains.csv"
