@@ -28,8 +28,10 @@ type SSLCheckResult struct {
 }
 
 type Config struct {
-	SlackWebhookURL string `yaml:"slack_webhook_url"`
-	CSVFilePath     string `yaml:"csv_file_path"`
+	SlackWebhookURL     string `yaml:"slack_webhook_url"`
+	CSVFilePath         string `yaml:"csv_file_path"`
+	NoOfWorker          int    `yaml:"no_of_workers"`
+	ExpirationThreshold int    `yaml:"expiration_threshold"`
 }
 
 var (
@@ -37,7 +39,6 @@ var (
 	results []SSLCheckResult
 )
 
-// LoadConfig loads the configuration from config.yml
 func LoadConfig(path string) (Config, error) {
 	var config Config
 	data, err := os.ReadFile(path)
@@ -72,7 +73,6 @@ func ReadDomainsFromCSV(filePath string) ([]string, error) {
 	return domains, nil
 }
 
-// CheckSSL checks the SSL certificate for a given domain
 func CheckSSL(domain string) SSLCheckResult {
 	result := SSLCheckResult{Domain: domain}
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
@@ -104,46 +104,57 @@ func CheckSSL(domain string) SSLCheckResult {
 	return result
 }
 
-// SendSlackNotification sends a notification to Slack
-func SendSlackNotification(webhookURL, domain, expirationDate string, daysRemaining int) {
-	message := fmt.Sprintf("⚠️ SSL Certificate Expiration Alert ⚠️\nDomain: %s\nExpiration Date: %s\nDays Remaining: %d", domain, expirationDate, daysRemaining)
-	payload := map[string]string{"text": message}
-	jsonPayload, _ := json.Marshal(payload)
+func SendSlackNotification(webhookURL string, messages []string) {
+	for _, message := range messages {
+		payload := map[string]string{"text": message}
+		jsonPayload, _ := json.Marshal(payload)
 
-	logger.Infof("Sending Slack notification: %s", message)
-	client := &http.Client{Timeout: 10 * time.Second}
-	_, err := client.Post(webhookURL, "application/json", bytes.NewReader(jsonPayload))
-	if err != nil {
-		logger.Errorf("Failed to send Slack notification: %v", err)
+		client := &http.Client{Timeout: 10 * time.Second}
+		_, err := client.Post(webhookURL, "application/json", bytes.NewReader(jsonPayload))
+		if err != nil {
+			logger.Errorf("Failed to send Slack notification: %v", err)
+		}
 	}
 }
 
-// PerformChecks performs SSL checks for all domains concurrently
-func PerformChecks(domains []string, slackWebhookURL string) {
+func PerformChecks(domains []string, slackWebhookURL string, workerLimit int) {
+
+	if workerLimit <= 0 {
+		logger.Fatalf("Invalid workerLimit: %d. It must be greater than 0.", workerLimit)
+	}
+
 	results = []SSLCheckResult{}
 	var wg sync.WaitGroup
 	resultsChannel := make(chan SSLCheckResult, len(domains))
+	sem := make(chan struct{}, workerLimit) // limit no of concurrent workers using semaphore
 
 	for _, domain := range domains {
 		wg.Add(1)
+		sem <- struct{}{} // Acquire a worker slot
 		go func(domain string) {
 			defer wg.Done()
 			resultsChannel <- CheckSSL(domain)
+			<-sem // Release the worker slot
 		}(domain)
 	}
 
 	wg.Wait()
 	close(resultsChannel)
 
+	slackMessages := []string{}
 	for result := range resultsChannel {
 		results = append(results, result)
 		if result.Error != "" {
 			logger.Warnf("Error for %s: %s", result.Domain, result.Error)
-			SendSlackNotification(slackWebhookURL, result.Domain, "N/A", 0)
-		} else if result.IsValid && result.ExpiresInDays <= 8 {
+			slackMessages = append(slackMessages, fmt.Sprintf("Error for %s: %s", result.Domain, result.Error))
+		} else if result.IsValid && result.ExpiresInDays <= config.ExpirationThreshold {
 			expirationDate := time.Now().Add(time.Duration(result.ExpiresInDays) * 24 * time.Hour).Format("2006-01-02")
-			SendSlackNotification(slackWebhookURL, result.Domain, expirationDate, result.ExpiresInDays)
+			slackMessages = append(slackMessages, fmt.Sprintf("⚠️ SSL Certificate Expiration Alert ⚠️\nDomain: %s\nExpiration Date: %s\nDays Remaining: %d", result.Domain, expirationDate, result.ExpiresInDays))
 		}
+	}
+
+	if len(slackMessages) > 0 {
+		SendSlackNotification(slackWebhookURL, slackMessages)
 	}
 }
 
@@ -158,14 +169,11 @@ func main() {
 		logger.Fatalf("Failed to read domains from CSV: %v", err)
 	}
 
-	// create a signal or tick so all code have this tick will be executed periodically
 	ticker := time.NewTicker(24 * time.Hour)
-	//ticker := time.NewTicker(10 * time.Second) // Runs every 10 seconds
-
 	defer ticker.Stop()
 
 	logger.Info("Starting initial SSL checks...")
-	PerformChecks(domains, config.SlackWebhookURL)
+	PerformChecks(domains, config.SlackWebhookURL, config.NoOfWorker) // Limit to 50 workers
 
 	r := gin.Default()
 	r.Use(gzip.Gzip(gzip.DefaultCompression))
@@ -177,7 +185,7 @@ func main() {
 	go func() {
 		for range ticker.C {
 			logger.Info("Performing periodic SSL checks...")
-			PerformChecks(domains, config.SlackWebhookURL)
+			PerformChecks(domains, config.SlackWebhookURL, config.NoOfWorker) // Limit to 50 workers
 		}
 	}()
 
@@ -186,7 +194,6 @@ func main() {
 		Handler: r,
 	}
 
-	//handle force closing the app
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
 	<-quit

@@ -1,2 +1,4 @@
 slack_webhook_url: ""
 csv_file_path: "domains.csv"
+no_of_workers: 100
+expiration_threshold: 3
